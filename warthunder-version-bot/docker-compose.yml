@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  wt-bot:
+    build: .
+    container_name: wt-version-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./versions.json:/app/versions.json
+      - ./subscribers.json:/app/subscribers.json
+      - ./bot_config.json:/app/bot_config.json
+    logging:
+      options:
+        max-size: "10m"
