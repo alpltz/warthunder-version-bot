@@ -4,7 +4,6 @@
 War Thunder Version Monitor Bot
 Мониторит Live / WiP / Dev версии и шлет в ЛС + в канал @WarThunder_Game
 """
-
 import asyncio
 import json
 import os
@@ -13,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
+from aiohttp import web
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
@@ -177,6 +177,45 @@ async def check_and_notify(app):
                             pass
 
     return changes
+
+# --- Web server for Render.com (чтобы не засыпал) ---
+async def handle_root(request):
+    return web.Response(text="War Thunder Version Bot is running! 🟢\nUse /health and /status", content_type="text/plain")
+
+async def handle_health(request):
+    return web.json_response({"status": "ok", "bot": "running", "versions": last_versions})
+
+async def handle_status_web(request):
+    html = f"""
+    <html><head><title>WT Bot Status</title></head><body style="font-family: sans-serif; background:#1a1a1a; color:#eee; padding:20px">
+    <h1>🟢 War Thunder Version Monitor - LIVE</h1>
+    <p>Last check: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</p>
+    <ul>
+        <li><b>Live:</b> {last_versions.get('Live', '?')}</li>
+        <li><b>WiP:</b> {last_versions.get('WiP', '?')}</li>
+        <li><b>Dev:</b> {last_versions.get('Dev', '?')}</li>
+    </ul>
+    <p>Subscribers: {len(subscribers)}</p>
+    <p>Channel: {bot_config.get('channel_id')} ({'ON' if bot_config.get('enable_channel') else 'OFF'})</p>
+    <p>Interval: {bot_config.get('interval')}s</p>
+    <hr><p><a href="https://t.me/WarThunder_Game" style="color:#4af">Channel @WarThunder_Game</a></p>
+    </body></html>
+    """
+    return web.Response(text=html, content_type="text/html")
+
+async def start_render_webserver():
+    port = int(os.getenv("PORT", "10000"))
+    web_app = web.Application()
+    web_app.add_routes([
+        web.get("/", handle_root),
+        web.get("/health", handle_health),
+        web.get("/status", handle_status_web),
+    ])
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"🌐 Web server started on port {port} for Render.com")
 
 # --- Background loop ---
 async def monitor_loop(app):
@@ -395,9 +434,59 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text(f"✅ Разослано {count} пользователям.")
 
+# --- Immediate web server for Render (binds port instantly) ---
+def start_immediate_webserver_for_render():
+    """Render требует чтобы порт открылся в первые секунды, иначе пишет No open ports detected.
+       Этот простой сервер открывается мгновенно в отдельном потоке."""
+    if not os.getenv("PORT") and not os.getenv("RENDER"):
+        return None
+    port = int(os.getenv("PORT", "10000"))
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import threading
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            try:
+                if self.path.startswith("/health"):
+                    self.send_response(200)
+                    self.send_header("Content-type", "application/json")
+                    self.end_headers()
+                    import json as _json
+                    payload = _json.dumps({"status": "ok", "bot": "running", "versions": last_versions}).encode()
+                    self.wfile.write(payload)
+                elif self.path.startswith("/status"):
+                    self.send_response(200)
+                    self.send_header("Content-type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    html = f"<h1>WT Bot LIVE</h1><p>Live: {last_versions.get('Live','?')}</p><p>WiP: {last_versions.get('WiP','?')}</p><p>Dev: {last_versions.get('Dev','?')}</p>".encode()
+                    self.wfile.write(html)
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("War Thunder Version Bot is running! Use /health and /status".encode())
+            except:
+                pass
+        def log_message(self, format, *args):
+            return
+
+    try:
+        server = HTTPServer(("0.0.0.0", port), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        print(f"🌐 Immediate web server bound on port {port} for Render (fix for 'No open ports')")
+        logger.info(f"Immediate web server bound on {port}")
+        return server
+    except Exception as e:
+        print(f"⚠️ Could not bind immediate server: {e}")
+        return None
+
 # --- Main ---
 def main():
     load_dotenv()
+    # Сразу открываем порт для Render, чтобы не было "No open ports detected"
+    start_immediate_webserver_for_render()
+
     token = os.getenv("BOT_TOKEN") or config.BOT_TOKEN
     if not token:
         print("❌ BOT_TOKEN не задан! Создай .env из .env.example и вставь токен от @BotFather")
@@ -421,9 +510,12 @@ def main():
     app.add_handler(CommandHandler("subscribers", subscribers_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
 
-    # Фоновый мониторинг
+    # Фоновый мониторинг + веб-сервер для Render
     async def on_startup(app):
         asyncio.create_task(monitor_loop(app))
+        # Если запущены на Render.com - там есть переменная PORT, стартуем веб-сервер чтобы не засыпал
+        if os.getenv("PORT") or os.getenv("RENDER"):
+            asyncio.create_task(start_render_webserver())
 
     app.post_init = on_startup
 
